@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tank Battle</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Press Start 2P', monospace;
+    }
+    canvas {
+      display: block;
+      cursor: crosshair;
+      box-shadow: 0 0 40px rgba(0, 255, 136, 0.3);
+      border: 2px solid #00FF88;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const W = 800, H = 600;
+    canvas.width = W;
+    canvas.height = H;
+
+    function resize() {
+      const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+      canvas.style.width = (W * s) + 'px';
+      canvas.style.height = (H * s) + 'px';
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Game state
+    let score = 0, wave = 1, gameOver = false, paused = false;
+    let shake = 0, shakeX = 0, shakeY = 0;
+
+    const keys = {};
+    let mouseX = W / 2, mouseY = H / 2, mouseDown = false;
+
+    // Player
+    const player = {
+      x: W / 2, y: H - 80,
+      w: 32, h: 32,
+      angle: -Math.PI / 2,
+      turretAngle: -Math.PI / 2,
+      speed: 3,
+      health: 3,
+      maxHealth: 3,
+      fireCD: 0,
+      fireRate: 300,
+      invincible: 0
+    };
+
+    let bullets = [];
+    let enemies = [];
+    let particles = [];
+    let enemyBullets = [];
+    let enemiesLeft = 5;
+    let spawnCD = 0;
+    let waveDelay = 0;
+
+    // Input
+    window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+    window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+    canvas.addEventListener('mousemove', e => {
+      const r = canvas.getBoundingClientRect();
+      const s = W / r.width;
+      mouseX = (e.clientX - r.left) * s;
+      mouseY = (e.clientY - r.top) * s;
+    });
+    canvas.addEventListener('mousedown', () => mouseDown = true);
+    canvas.addEventListener('mouseup', () => mouseDown = false);
+
+    // Utility
+    function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+    function angleTo(a, b) { return Math.atan2(b.y - a.y, b.x - a.x); }
+
+    function spawnParticles(x, y, color, count) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const sp = 1 + Math.random() * 4;
+        particles.push({
+          x, y,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp,
+          life: 1,
+          decay: 0.02 + Math.random() * 0.03,
+          color,
+          size: 2 + Math.random() * 4
+        });
+      }
+    }
+
+    function spawnEnemy() {
+      const side = Math.floor(Math.random() * 3);
+      let x, y;
+      if (side === 0) { x = Math.random() * W; y = -40; }
+      else if (side === 1) { x = -40; y = Math.random() * H / 2; }
+      else { x = W + 40; y = Math.random() * H / 2; }
+
+      enemies.push({
+        x, y,
+        w: 28, h: 28,
+        angle: Math.PI / 2,
+        speed: 1.2 + wave * 0.1,
+        health: 1,
+        fireCD: Math.random() * 1000,
+        fireRate: 1500 - wave * 50,
+        dirChange: 0,
+        moveAngle: Math.random() * Math.PI * 2
+      });
+    }
+
+    function fireBullet(x, y, angle, isEnemy) {
+      bullets.push({
+        x, y,
+        vx: Math.cos(angle) * 8,
+        vy: Math.sin(angle) * 8,
+        isEnemy,
+        life: 1
+      });
+      spawnParticles(x, y, '#FFFF00', 3);
+    }
+
+    function triggerShake(intensity) {
+      shake = intensity;
+    }
+
+    // Update
+    function update(dt) {
+      if (gameOver) {
+        if (keys['r']) restart();
+        return;
+      }
+
+      // Player movement
+      let dx = 0, dy = 0;
+      if (keys['w'] || keys['arrowup']) dy -= 1;
+      if (keys['s'] || keys['arrowdown']) dy += 1;
+      if (keys['a'] || keys['arrowleft']) dx -= 1;
+      if (keys['d'] || keys['arrowright']) dx += 1;
+
+      if (dx || dy) {
+        const len = Math.hypot(dx, dy);
+        dx /= len; dy /= len;
+        player.x = Math.max(player.w / 2, Math.min(W - player.w / 2, player.x + dx * player.speed));
+        player.y = Math.max(player.h / 2, Math.min(H - player.h / 2, player.y + dy * player.speed));
+        player.angle = Math.atan2(dy, dx);
+      }
+
+      player.turretAngle = angleTo(player, { x: mouseX, y: mouseY });
+
+      // Player fire
+      player.fireCD -= dt;
+      if (mouseDown && player.fireCD <= 0) {
+        const bx = player.x + Math.cos(player.turretAngle) * 20;
+        const by = player.y + Math.sin(player.turretAngle) * 20;
+        fireBullet(bx, by, player.turretAngle, false);
+        player.fireCD = player.fireRate;
+      }
+
+      if (player.invincible > 0) player.invincible -= dt;
+
+      // Enemy spawning
+      if (enemiesLeft > 0) {
+        spawnCD -= dt;
+        if (spawnCD <= 0) {
+          spawnEnemy();
+          enemiesLeft--;
+          spawnCD = 2000;
+        }
+      }
+
+      // Wave management
+      if (enemiesLeft === 0 && enemies.length === 0 && waveDelay <= 0) {
+        waveDelay = 3000;
+        score += 500;
+      }
+      if (waveDelay > 0) {
+        waveDelay -= dt;
+        if (waveDelay <= 0) {
+          wave++;
+          enemiesLeft = 5 + (wave - 1) * 3;
+          spawnCD = 0;
+        }
+      }
+
+      // Enemy update
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+
+        e.dirChange -= dt;
+        if (e.dirChange <= 0) {
+          e.moveAngle = Math.random() * Math.PI * 2;
+          e.dirChange = 1000 + Math.random() * 2000;
+        }
+
+        // Move
+        e.x += Math.cos(e.moveAngle) * e.speed;
+        e.y += Math.sin(e.moveAngle) * e.speed;
+
+        // Bounce off edges
+        if (e.x < 20 || e.x > W - 20) { e.moveAngle = Math.PI - e.moveAngle; e.x = Math.max(20, Math.min(W - 20, e.x)); }
+        if (e.y < 20 || e.y > H - 20) { e.moveAngle = -e.moveAngle; e.y = Math.max(20, Math.min(H - 20, e.y)); }
+
+        // Aim at player
+        e.angle = angleTo(e, player);
+
+        // Fire
+        e.fireCD -= dt;
+        if (e.fireCD <= 0 && dist(e, player) < 400) {
+          const a = angleTo(e, player);
+          const bx = e.x + Math.cos(a) * 18;
+          const by = e.y + Math.sin(a) * 18;
+          fireBullet(bx, by, a, true);
+          e.fireCD = e.fireRate;
+        }
+      }
+
+      // Bullets
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
+
+        if (b.x < 0 || b.x > W || b.y < 0 || b.y > H) {
+          bullets.splice(i, 1);
+          continue;
+        }
+
+        if (!b.isEnemy) {
+          // Hit enemies
+          for (let j = enemies.length - 1; j >= 0; j--) {
+            if (dist(b, enemies[j]) < 20) {
+              enemies[j].health--;
+              bullets.splice(i, 1);
+              if (enemies[j].health <= 0) {
+                spawnParticles(enemies[j].x, enemies[j].y, '#FF4444', 15);
+                spawnParticles(enemies[j].x, enemies[j].y, '#FF8800', 10);
+                enemies.splice(j, 1);
+                score += 100;
+                triggerShake(6);
+              }
+              break;
+            }
+          }
+        } else {
+          // Hit player
+          if (player.invincible <= 0 && dist(b, player) < 18) {
+            player.health--;
+            player.invincible = 1000;
+            bullets.splice(i, 1);
+            triggerShake(10);
+            spawnParticles(player.x, player.y, '#00FF88', 8);
+            if (player.health <= 0) gameOver = true;
+          }
+        }
+      }
+
+      // Particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.95;
+        p.vy *= 0.95;
+        p.life -= p.decay;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+
+      // Shake
+      if (shake > 0) {
+        shakeX = (Math.random() - 0.5) * shake;
+        shakeY = (Math.random() - 0.5) * shake;
+        shake *= 0.85;
+        if (shake < 0.5) shake = 0;
+      } else { shakeX = 0; shakeY = 0; }
+    }
+
+    // Draw
+    function drawTank(x, y, angle, turretAngle, color, bodyColor, isPlayer) {
+      ctx.save();
+      ctx.translate(x, y);
+
+      // Body
+      ctx.save();
+      ctx.rotate(angle);
+      ctx.fillStyle = bodyColor;
+      ctx.fillRect(-16, -12, 32, 24);
+      ctx.fillStyle = color;
+      ctx.fillRect(-10, -8, 20, 16);
+      // Treads
+      ctx.fillStyle = '#333';
+      ctx.fillRect(-16, -14, 32, 4);
+      ctx.fillRect(-16, 10, 32, 4);
+      ctx.restore();
+
+      // Turret
+      ctx.rotate(turretAngle);
+      ctx.fillStyle = '#888';
+      ctx.beginPath();
+      ctx.arc(0, 0, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = color;
+      ctx.fillRect(0, -3, 20, 6);
+
+      ctx.restore();
+    }
+
+    function render() {
+      ctx.save();
+      ctx.translate(shakeX, shakeY);
+
+      // Background
+      ctx.fillStyle = '#1a1a0a';
+      ctx.fillRect(0, 0, W, H);
+
+      // Grid
+      ctx.strokeStyle = '#252515';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < W; x += 40) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+      for (let y = 0; y < H; y += 40) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+
+      // Bullets
+      for (const b of bullets) {
+        ctx.save();
+        ctx.shadowColor = b.isEnemy ? '#FF0000' : '#FFFF00';
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = b.isEnemy ? '#FF4444' : '#FFFF00';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Enemies
+      for (const e of enemies) {
+        drawTank(e.x, e.y, e.angle, e.angle, '#FF4444', '#AA2222', false);
+      }
+
+      // Player
+      const alpha = player.invincible > 0 ? 0.5 + Math.sin(Date.now() * 0.02) * 0.3 : 1;
+      ctx.globalAlpha = alpha;
+      drawTank(player.x, player.y, player.angle, player.turretAngle, '#00FF88', '#008844', true);
+      ctx.globalAlpha = 1;
+
+      // Particles
+      for (const p of particles) {
+        ctx.globalAlpha = p.life;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      ctx.restore();
+
+      // UI
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px "Press Start 2P", monospace';
+      ctx.fillText('SCORE: ' + score, 16, 30);
+
+      ctx.textAlign = 'center';
+      ctx.fillText('WAVE ' + wave, W / 2, 30);
+      ctx.textAlign = 'left';
+
+      // Health
+      const hpW = 120;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(W - hpW - 16, 16, hpW, 20);
+      const hpPct = player.health / player.maxHealth;
+      ctx.fillStyle = hpPct > 0.5 ? '#00FF88' : hpPct > 0.25 ? '#FFAA00' : '#FF4444';
+      ctx.fillRect(W - hpW - 16, 16, hpW * hpPct, 20);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(W - hpW - 16, 16, hpW, 20);
+      ctx.fillStyle = '#fff';
+      ctx.font = '8px "Press Start 2P", monospace';
+      ctx.fillText('HP', W - hpW - 30, 30);
+
+      // Wave incoming
+      if (waveDelay > 0) {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(W / 2 - 160, H / 2 - 40, 320, 80);
+        ctx.strokeStyle = '#00FF88';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(W / 2 - 160, H / 2 - 40, 320, 80);
+        ctx.fillStyle = '#00FF88';
+        ctx.font = '16px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('WAVE ' + (wave + 1), W / 2, H / 2);
+        ctx.font = '10px "Press Start 2P", monospace';
+        ctx.fillStyle = '#aaa';
+        ctx.fillText('GET READY!', W / 2, H / 2 + 24);
+        ctx.textAlign = 'left';
+      }
+
+      // Game Over
+      if (gameOver) {
+        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#FF4444';
+        ctx.font = '32px "Press Start 2P", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+        ctx.fillStyle = '#fff';
+        ctx.font = '16px "Press Start 2P", monospace';
+        ctx.fillText('SCORE: ' + score, W / 2, H / 2 + 10);
+        ctx.fillStyle = '#aaa';
+        ctx.font = '12px "Press Start 2P", monospace';
+        ctx.fillText('PRESS R TO RESTART', W / 2, H / 2 + 50);
+        ctx.textAlign = 'left';
+      }
+
+      // Controls hint
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.font = '8px "Press Start 2P", monospace';
+      ctx.fillText('WASD: MOVE  |  MOUSE: AIM  |  CLICK: FIRE', 10, H - 10);
+    }
+
+    function restart() {
+      score = 0; wave = 1; gameOver = false;
+      player.x = W / 2; player.y = H - 80;
+      player.health = player.maxHealth;
+      player.invincible = 0; player.fireCD = 0;
+      bullets = []; enemies = []; particles = [];
+      enemiesLeft = 5 + (wave - 1) * 3;
+      spawnCD = 0; waveDelay = 0;
+    }
+
+    let last = 0;
+    function loop(ts) {
+      const dt = Math.min(ts - last, 50);
+      last = ts;
+      update(dt);
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    enemiesLeft = 5;
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
